@@ -11,41 +11,41 @@ import (
 )
 
 type GithubAuthorizer struct {
-	client     *github.Client
-	accessTeam int
-	adminTeam  int
+	client       *github.Client
+	organization string
+	teams        map[string]int
 }
 
-func NewGithubAuthorizer(token, organization, accessGroup, adminGroup string) (*GithubAuthorizer, error) {
+func NewGithubAuthorizer(token, organization string, teams ...string) (*GithubAuthorizer, error) {
 	ts := oauth2.StaticTokenSource(
 		&oauth2.Token{AccessToken: token},
 	)
 
 	githubClient := github.NewClient(oauth2.NewClient(oauth2.NoContext, ts))
 
-	var accessTeamID, adminTeamID int
+	teamIDs := map[string]int{}
 	if organization != "" {
-		teams, _, err := githubClient.Organizations.ListTeams(organization, &github.ListOptions{})
+		ghteams, _, err := githubClient.Organizations.ListTeams(organization, &github.ListOptions{})
 		if err != nil {
 			return nil, errors.Wrap(err, "list teams github api error")
 		}
 
-		for _, t := range teams {
+		for _, t := range ghteams {
 			if t.Name != nil && t.ID != nil {
-				if *t.Name == accessGroup {
-					accessTeamID = *t.ID
-				}
-				if *t.Name == adminGroup {
-					adminTeamID = *t.ID
+				for _, team := range teams {
+					if *t.Name == team {
+						teamIDs[team] = *t.ID
+						break
+					}
 				}
 			}
 		}
 	}
 
 	return &GithubAuthorizer{
-		client:     githubClient,
-		accessTeam: accessTeamID,
-		adminTeam:  adminTeamID,
+		client:       githubClient,
+		organization: organization,
+		teams:        teamIDs,
 	}, nil
 }
 
@@ -71,31 +71,44 @@ func (ga GithubAuthorizer) Authorize(conn ssh.ConnMetadata, key ssh.PublicKey) (
 		return nil, errors.New("no authorized key")
 	}
 
-	if ga.accessTeam != 0 {
-		// Ensure user is in group
-		isMember, _, err := ga.client.Organizations.IsTeamMember(ga.accessTeam, conn.User())
+	permissions := &ssh.Permissions{
+		Extensions: map[string]string{
+			"organization": ga.organization,
+		},
+	}
+
+	var hasPermission bool
+	for team, teamID := range ga.teams {
+		isMember, _, err := ga.client.Organizations.IsTeamMember(teamID, conn.User())
 		if err != nil {
-			return nil, errors.Wrapf(err, "is team member (%d) github api error", ga.accessTeam)
+			return nil, errors.Wrapf(err, "is team member (%d) github api error", team)
 		}
-		if !isMember {
-			return nil, errors.New("no access to group")
+		if isMember {
+			permissions.Extensions["team-"+team] = "true"
+			hasPermission = true
 		}
 	}
 
-	permissions := &ssh.Permissions{}
-
-	if ga.adminTeam != 0 {
-		isMember, _, err := ga.client.Organizations.IsTeamMember(ga.adminTeam, conn.User())
-		if err != nil {
-			return nil, errors.Wrapf(err, "is team member (%d) github api error", ga.adminTeam)
-		}
-		if isMember {
-			permissions.Extensions = map[string]string{
-				"admin-access": "true",
-			}
-		}
+	if !hasPermission {
+		return nil, errors.New("no valid team membership")
 	}
 
 	logrus.Infof("Logging from %s using %s", conn.User(), authorizedKey)
 	return permissions, nil
+}
+
+func IsTeamMember(permissions *ssh.Permissions, organization, team string) bool {
+	if permissions.Extensions == nil {
+		return false
+	}
+
+	if permissions.Extensions["organization"] != organization {
+		return false
+	}
+
+	if permissions.Extensions["team-"+team] != "true" {
+		return false
+	}
+
+	return true
 }
