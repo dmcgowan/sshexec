@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"flag"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"time"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/dmcgowan/sshexec"
@@ -31,6 +33,7 @@ func main() {
 		listenAddr      string
 		cert            string
 		certKey         string
+		expireDuration  time.Duration
 	)
 
 	flag.StringVar(&githubToken, "t", "", "Github access token")
@@ -41,6 +44,7 @@ func main() {
 	flag.StringVar(&listenAddr, "l", ":7329", "Listen address")
 	flag.StringVar(&cert, "c", "", "CA Certificate")
 	flag.StringVar(&certKey, "ck", "", "CA Certificate Key")
+	flag.DurationVar(&expireDuration, "x", 30*24*time.Hour, "Duration for certificates to be valid")
 
 	flag.Parse()
 
@@ -78,23 +82,23 @@ func main() {
 			return errors.Wrap(err, "error parsing certificate request")
 		}
 
-		if sc.User() != csr.Subject.CommonName {
-			return errors.Errorf("unexpected common name %q, expected %q", csr.Subject.CommonName, sc.User())
+		if err := validateSubject(sc, csr.Subject); err != nil {
+			return errors.Wrap(err, "subject validation failed")
 		}
 
-		sn, err := rand.Int(rand.Reader, big.NewInt(0xFFFFFFFFFFFF))
+		sn, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 		if err != nil {
 			return errors.Wrap(err, "error creating int")
 		}
-		// TODO: Verify extensions
+
 		certTemplate := &x509.Certificate{
-			SerialNumber:    sn,
-			Subject:         csr.Subject,
-			DNSNames:        csr.DNSNames,
-			IPAddresses:     csr.IPAddresses,
-			EmailAddresses:  csr.EmailAddresses,
-			Extensions:      csr.Extensions,
-			ExtraExtensions: csr.ExtraExtensions,
+			SerialNumber:          sn,
+			Subject:               csr.Subject,
+			NotBefore:             time.Now(),
+			NotAfter:              time.Now().Add(expireDuration),
+			KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+			ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+			BasicConstraintsValid: true,
 		}
 		cert, err := x509.CreateCertificate(rand.Reader, certTemplate, ca, csr.PublicKey, caKey)
 		if err != nil {
@@ -116,6 +120,19 @@ func main() {
 	}
 
 	d.Serve(l)
+}
+
+func validateSubject(sc *ssh.ServerConn, subject pkix.Name) error {
+	if sc.User() != subject.CommonName {
+		return errors.Errorf("unexpected common name %q, expected %q", subject.CommonName, sc.User())
+	}
+	if len(subject.Organization) != 1 || len(subject.OrganizationalUnit) != 1 {
+		return errors.Errorf("bad organization information")
+	}
+	if !githubauth.IsTeamMember(sc.Permissions, subject.Organization[0], subject.OrganizationalUnit[0]) {
+		return errors.Errorf("no team membership to %s %s", subject.Organization[0], subject.OrganizationalUnit[0])
+	}
+	return nil
 }
 
 func loadCertificate(certFile, keyFile string) (*x509.Certificate, crypto.PrivateKey, error) {
