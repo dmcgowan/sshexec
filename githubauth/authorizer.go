@@ -42,6 +42,10 @@ func NewGithubAuthorizer(token, organization string, teams ...string) (*GithubAu
 		}
 	}
 
+	if len(teams) != len(teamIDs) {
+		return nil, errors.Errorf("could not access all requested github teams")
+	}
+
 	return &GithubAuthorizer{
 		client:       githubClient,
 		organization: organization,
