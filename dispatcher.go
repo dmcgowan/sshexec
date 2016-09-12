@@ -7,11 +7,12 @@ import (
 	"time"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/google/shlex"
 	"github.com/pkg/errors"
 	"golang.org/x/crypto/ssh"
 )
 
-type ExecHandler func(*ssh.ServerConn, io.ReadWriteCloser) error
+type ExecHandler func([]string, *ssh.ServerConn, io.ReadWriteCloser) error
 
 type Dispatcher struct {
 	c *ssh.ServerConfig
@@ -71,12 +72,12 @@ func (d *Dispatcher) handleConn(conn net.Conn) {
 		return
 	}
 
-	hchan := make(chan ExecHandler)
+	hchan := make(chan func(*ssh.ServerConn, io.ReadWriteCloser) error)
 
 	go func() {
 		for r := range rc {
 			var err error
-			var h ExecHandler
+			var h func(*ssh.ServerConn, io.ReadWriteCloser) error
 
 			switch r.Type {
 			case "env":
@@ -85,7 +86,20 @@ func (d *Dispatcher) handleConn(conn net.Conn) {
 				err = errors.New("shell not supported")
 			case "exec":
 				l := binary.BigEndian.Uint32(r.Payload)
-				h, err = d.lookupCommand(string(r.Payload[4 : l+4]))
+				args, err := shlex.Split(string(r.Payload[4 : l+4]))
+				if err != nil {
+					err = errors.Wrap(err, "unable ot parse exec command")
+				} else if len(args) == 0 {
+					err = errors.New("no exec command given")
+				} else {
+					var f ExecHandler
+					f, err = d.lookupCommand(args[0])
+					if err == nil {
+						h = func(sc *ssh.ServerConn, rw io.ReadWriteCloser) error {
+							return f(args, sc, rw)
+						}
+					}
+				}
 			default:
 				err = errors.Errorf("unknown type: %s", r.Type)
 			}
