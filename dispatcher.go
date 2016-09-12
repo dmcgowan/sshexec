@@ -88,7 +88,7 @@ func (d *Dispatcher) handleConn(conn net.Conn) {
 				l := binary.BigEndian.Uint32(r.Payload)
 				args, err := shlex.Split(string(r.Payload[4 : l+4]))
 				if err != nil {
-					err = errors.Wrap(err, "unable ot parse exec command")
+					err = errors.Wrap(err, "unable to parse exec command")
 				} else if len(args) == 0 {
 					err = errors.New("no exec command given")
 				} else {
