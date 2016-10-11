@@ -2,6 +2,7 @@ package sshexec
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
 	"time"
@@ -135,7 +136,9 @@ func (d *Dispatcher) handleConn(conn net.Conn) {
 	var responseStatus uint32
 	err = h(sc, c)
 	if err != nil {
-		logrus.Infof("Command failed: %+v", err)
+		logrus.Debugf("Command failed: %+v", err)
+
+		fmt.Fprintf(c.Stderr(), "Command failed: %v\n", err)
 
 		// TODO: Check if has status function
 		responseStatus = 1
