@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"time"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/google/shlex"
@@ -59,101 +58,106 @@ func (d *Dispatcher) handleConn(conn net.Conn) {
 
 	go ssh.DiscardRequests(rc)
 
-	nc := <-ncc
-
-	if nc.ChannelType() != "session" {
-		if err := nc.Reject(ssh.UnknownChannelType, "channel not currently supported"); err != nil {
-			logrus.Errorf("Reject error: %v", err)
+	for nc := range ncc {
+		if nc.ChannelType() != "session" {
+			logrus.Debugf("Rejecting channel type: %s", nc.ChannelType())
+			if err := nc.Reject(ssh.UnknownChannelType, "channel not currently supported"); err != nil {
+				logrus.Errorf("Reject error: %v", err)
+			}
+			continue
 		}
-		return
+
+		c, rc, err := nc.Accept()
+		if err != nil {
+			logrus.Errorf("Accept error: %v", err)
+			break
+		}
+
+		hchan := make(chan execHandler)
+
+		go d.handleChannelRequests(rc, hchan)
+
+		go func() {
+			defer c.Close()
+
+			h := <-hchan
+
+			var responseStatus uint32
+			err = h(sc, closeChannelWriter{c})
+			if err != nil {
+				logrus.Debugf("Command failed: %+v", err)
+
+				fmt.Fprintf(c.Stderr(), "Command failed: %v\n", err)
+
+				// TODO: Check if has status function
+				responseStatus = 1
+			}
+
+			payload := make([]byte, 4)
+			binary.BigEndian.PutUint32(payload, responseStatus)
+			if _, err := c.SendRequest("exit-status", false, payload); err != nil {
+				logrus.Errorf("Send exit status error: %v", err)
+			}
+		}()
 	}
-	c, rc, err := nc.Accept()
-	if err != nil {
-		logrus.Errorf("Accept error: %v", err)
-		return
-	}
+}
 
-	hchan := make(chan func(*ssh.ServerConn, io.ReadWriteCloser) error)
+type execHandler func(*ssh.ServerConn, io.ReadWriteCloser) error
 
-	go func() {
-		for r := range rc {
-			var err error
-			var h func(*ssh.ServerConn, io.ReadWriteCloser) error
+func (d *Dispatcher) handleChannelRequests(rc <-chan *ssh.Request, hchan chan<- execHandler) {
+	for r := range rc {
+		var err error
+		var h func(*ssh.ServerConn, io.ReadWriteCloser) error
 
-			switch r.Type {
-			case "env":
-				// TODO: Print envs
-			case "shell":
-				err = errors.New("shell not supported")
-			case "exec":
-				l := binary.BigEndian.Uint32(r.Payload)
-				args, err := shlex.Split(string(r.Payload[4 : l+4]))
-				if err != nil {
-					err = errors.Wrap(err, "unable to parse exec command")
-				} else if len(args) == 0 {
-					err = errors.New("no exec command given")
-				} else {
-					var f ExecHandler
-					f, err = d.lookupCommand(args[0])
-					if err == nil {
-						h = func(sc *ssh.ServerConn, rw io.ReadWriteCloser) error {
-							return f(args, sc, rw)
-						}
+		switch r.Type {
+		case "env":
+			// TODO: Print envs
+		case "shell":
+			err = errors.New("shell not supported")
+		case "exec":
+			l := binary.BigEndian.Uint32(r.Payload)
+			args, err := shlex.Split(string(r.Payload[4 : l+4]))
+			if err != nil {
+				err = errors.Wrap(err, "unable to parse exec command")
+			} else if len(args) == 0 {
+				err = errors.New("no exec command given")
+			} else {
+				var f ExecHandler
+				f, err = d.lookupCommand(args[0])
+				if err == nil {
+					h = func(sc *ssh.ServerConn, rw io.ReadWriteCloser) error {
+						return f(args, sc, rw)
 					}
 				}
-			default:
-				err = errors.Errorf("unknown type: %s", r.Type)
 			}
+		default:
+			err = errors.Errorf("unknown type: %s", r.Type)
+		}
 
-			if r.WantReply {
-				if err != nil {
-					errMsg := err.Error()
-					logrus.Errorf("Request rejected: %+v", errMsg)
-					payload := make([]byte, len(errMsg)+4)
-					binary.BigEndian.PutUint32(payload, uint32(len(errMsg)))
-					copy(payload[4:], errMsg)
-					err = r.Reply(false, payload)
-				} else {
-					err = r.Reply(true, nil)
-				}
-				if err != nil {
-					logrus.Infof("Reply error: %+v", err)
-					continue
-				}
-			} else if err != nil {
-				logrus.Infof("Request error: %+v", err)
+		if r.WantReply {
+			if err != nil {
+				errMsg := err.Error()
+				logrus.Errorf("Request rejected: %+v", errMsg)
+				payload := make([]byte, len(errMsg)+4)
+				binary.BigEndian.PutUint32(payload, uint32(len(errMsg)))
+				copy(payload[4:], errMsg)
+				err = r.Reply(false, payload)
+			} else {
+				err = r.Reply(true, nil)
+			}
+			if err != nil {
+				logrus.Infof("Reply error: %+v", err)
 				continue
 			}
-			if h != nil {
-				hchan <- h
-			}
-
+		} else if err != nil {
+			logrus.Infof("Request error: %+v", err)
+			continue
 		}
-	}()
+		if h != nil {
+			hchan <- h
+		}
 
-	h := <-hchan
-
-	var responseStatus uint32
-	err = h(sc, c)
-	if err != nil {
-		logrus.Debugf("Command failed: %+v", err)
-
-		fmt.Fprintf(c.Stderr(), "Command failed: %v\n", err)
-
-		// TODO: Check if has status function
-		responseStatus = 1
 	}
-
-	payload := make([]byte, 4)
-	binary.BigEndian.PutUint32(payload, responseStatus)
-	if _, err := c.SendRequest("exit-status", false, payload); err != nil {
-		logrus.Errorf("Send exit status error: %v", err)
-	}
-
-	c.Close()
-
-	// Before closing the connection give client a chance to clean up
-	time.Sleep(time.Second)
 }
 
 func (d *Dispatcher) AddCommand(name string, h ExecHandler) {
@@ -167,4 +171,12 @@ func (d *Dispatcher) lookupCommand(name string) (ExecHandler, error) {
 	}
 
 	return cmd, nil
+}
+
+type closeChannelWriter struct {
+	ssh.Channel
+}
+
+func (c closeChannelWriter) Close() error {
+	return c.CloseWrite()
 }
