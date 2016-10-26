@@ -25,20 +25,32 @@ func NewGithubAuthorizer(token, organization string, teams ...string) (*GithubAu
 
 	teamIDs := map[string]int{}
 	if organization != "" {
-		ghteams, _, err := githubClient.Organizations.ListTeams(organization, &github.ListOptions{})
-		if err != nil {
-			return nil, errors.Wrap(err, "list teams github api error")
+		listOptions := &github.ListOptions{
+			Page:    1,
+			PerPage: 100,
 		}
+		for {
+			ghteams, _, err := githubClient.Organizations.ListTeams(organization, listOptions)
+			if err != nil {
+				return nil, errors.Wrap(err, "list teams github api error")
+			}
 
-		for _, t := range ghteams {
-			if t.Name != nil && t.ID != nil {
-				for _, team := range teams {
-					if *t.Name == team {
-						teamIDs[team] = *t.ID
-						break
+			for _, t := range ghteams {
+				if t.Name != nil && t.ID != nil {
+					for _, team := range teams {
+						if *t.Name == team {
+							teamIDs[team] = *t.ID
+							break
+						}
 					}
 				}
 			}
+
+			if len(ghteams) != listOptions.PerPage || len(teams) == len(teamIDs) {
+				break
+			}
+
+			listOptions.Page = listOptions.Page + 1
 		}
 	}
 
