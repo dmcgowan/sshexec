@@ -6,7 +6,6 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"flag"
-	"io"
 	"io/ioutil"
 	"net"
 	"os"
@@ -49,17 +48,17 @@ func main() {
 
 	d := sshexec.NewDispatcher(signer, ga)
 
-	d.AddCommand("echo", func(sc *ssh.ServerConn, rw io.ReadWriteCloser) error {
-		b, err := ioutil.ReadAll(rw)
+	d.HandleCommand("echo", func(c ssh.Channel, cs sshexec.ConnectionSettings, ts <-chan sshexec.TerminalSettings) error {
+		b, err := ioutil.ReadAll(c)
 		if err != nil {
 			return errors.Wrap(err, "failed to read all")
 		}
 
-		if _, err := rw.Write(b); err != nil {
+		if _, err := c.Write(b); err != nil {
 			return errors.Wrap(err, "failed to write")
 		}
 
-		logrus.Infof("Wrote response for %s", sc.User())
+		logrus.Infof("Wrote response for %s", cs.User)
 
 		return nil
 	})

@@ -9,7 +9,6 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"flag"
-	"io"
 	"io/ioutil"
 	"math/big"
 	"net"
@@ -65,8 +64,8 @@ func main() {
 
 	d := sshexec.NewDispatcher(signer, ga)
 
-	d.AddCommand("sign", func(sc *ssh.ServerConn, rw io.ReadWriteCloser) error {
-		pemBlock, err := ioutil.ReadAll(rw)
+	d.HandleCommand("sign", func(c ssh.Channel, cs sshexec.ConnectionSettings, ts <-chan sshexec.TerminalSettings) error {
+		pemBlock, err := ioutil.ReadAll(c)
 		if err != nil {
 			return errors.Wrap(err, "failed to read all")
 		}
@@ -82,7 +81,7 @@ func main() {
 			return errors.Wrap(err, "error parsing certificate request")
 		}
 
-		if err := validateSubject(sc, csr.Subject); err != nil {
+		if err := validateSubject(cs, csr.Subject); err != nil {
 			return errors.Wrap(err, "subject validation failed")
 		}
 
@@ -106,7 +105,7 @@ func main() {
 		}
 
 		certPem := &pem.Block{Type: "CERTIFICATE", Bytes: cert}
-		err = pem.Encode(rw, certPem)
+		err = pem.Encode(c, certPem)
 		if err != nil {
 			return errors.Wrap(err, "error encoding certificate")
 		}
@@ -122,14 +121,14 @@ func main() {
 	d.Serve(l)
 }
 
-func validateSubject(sc *ssh.ServerConn, subject pkix.Name) error {
-	if sc.User() != subject.CommonName {
-		return errors.Errorf("unexpected common name %q, expected %q", subject.CommonName, sc.User())
+func validateSubject(cs sshexec.ConnectionSettings, subject pkix.Name) error {
+	if cs.User != subject.CommonName {
+		return errors.Errorf("unexpected common name %q, expected %q", subject.CommonName, cs.User)
 	}
 	if len(subject.Organization) != 1 || len(subject.OrganizationalUnit) != 1 {
 		return errors.Errorf("bad organization information")
 	}
-	if !githubauth.IsTeamMember(sc.Permissions, subject.Organization[0], subject.OrganizationalUnit[0]) {
+	if !githubauth.IsTeamMember(cs.Permissions, subject.Organization[0], subject.OrganizationalUnit[0]) {
 		return errors.Errorf("no team membership to %s %s", subject.Organization[0], subject.OrganizationalUnit[0])
 	}
 	return nil
