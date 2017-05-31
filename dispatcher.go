@@ -3,6 +3,7 @@ package sshexec
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 
 	"github.com/Sirupsen/logrus"
@@ -26,11 +27,17 @@ type TerminalSettings struct {
 
 type Handler func(ssh.Channel, ConnectionSettings, <-chan TerminalSettings) error
 
+// ForwardDial connects to an address
+//  - "tcp://<host>:<port>" for connecting to a TCP location
+//  - "unix://<path>" for connecting to a unix socket
+type ForwardDial func(string, ConnectionSettings) (net.Conn, error)
+
 type Dispatcher struct {
 	c *ssh.ServerConfig
 
 	shell    Handler
 	commands map[string]Handler
+	forwards map[string]ForwardDial
 }
 
 func NewDispatcher(serverKey ssh.Signer, auth Authorizer) *Dispatcher {
@@ -48,9 +55,11 @@ func NewDispatcher(serverKey ssh.Signer, auth Authorizer) *Dispatcher {
 	return &Dispatcher{
 		c:        c,
 		commands: map[string]Handler{},
+		forwards: map[string]ForwardDial{},
 	}
 }
 
+// Serve accepts and handles connections from the listener.
 func (d *Dispatcher) Serve(l net.Listener) {
 	for {
 		conn, err := l.Accept()
@@ -61,6 +70,32 @@ func (d *Dispatcher) Serve(l net.Listener) {
 	}
 }
 
+// HandleShells calls the given handler with a shell request is received.
+func (d *Dispatcher) HandleShell(h Handler) {
+	d.shell = wrapHandler(h)
+}
+
+// HandleCommand handles exec commands for the provided name.
+func (d *Dispatcher) HandleCommand(name string, h Handler) {
+	d.commands[name] = wrapHandler(h)
+}
+
+// HandleForwards registers a dial function for specified address. If
+// the address is empty it will be called for all addresses which do not
+// have a more specific match.
+func (d *Dispatcher) HandleForward(address string, h ForwardDial) {
+	d.forwards[address] = h
+}
+
+func discardRequests(in <-chan *ssh.Request) {
+	for req := range in {
+		logrus.Debugf("Discarding: %s", req.Type)
+		if req.WantReply {
+			req.Reply(false, nil)
+		}
+	}
+}
+
 func (d *Dispatcher) handleConn(conn net.Conn) {
 	sc, ncc, rc, err := ssh.NewServerConn(conn, d.c)
 	if err != nil {
@@ -68,32 +103,46 @@ func (d *Dispatcher) handleConn(conn net.Conn) {
 		return
 	}
 	defer sc.Close()
+	// Defer wait for shutdown
 
-	go func(in <-chan *ssh.Request) {
-		for req := range in {
-			logrus.Debugf("Discarding: %s", req.Type)
-			if req.WantReply {
-				req.Reply(false, nil)
-			}
-		}
-	}(rc)
+	go discardRequests(rc)
 
 	for nc := range ncc {
-		if nc.ChannelType() != "session" {
+		switch nc.ChannelType() {
+		case "session":
+			c, rc, err := nc.Accept()
+			if err != nil {
+				logrus.Errorf("Accept error: %v", err)
+				break
+			}
+
+			go d.handleChannelRequests(sc, c, rc)
+		case "direct-tcpip":
+			host, b := strVal(nc.ExtraData())
+			hostP, b := intVal(b)
+			orig, b := strVal(b)
+			origP, b := intVal(b)
+
+			address := fmt.Sprintf("tcp://%s:%d", host, hostP)
+			logrus.Debugf("Forward requested to %s from %s:%d", address, orig, origP)
+
+			go d.handleForward(sc, nc, address)
+
+		// OpenSSH defined extension for connecting to a unix socket
+		// see https://github.com/openssh/openssh-portable/blob/master/PROTOCOL
+		case "direct-streamlocal@openssh.com":
+			socketPath, _ := strVal(nc.ExtraData())
+
+			address := fmt.Sprintf("unix://%s", socketPath)
+			logrus.Debugf("Forward requested to %s", address)
+
+			go d.handleForward(sc, nc, address)
+		default:
 			logrus.Debugf("Rejecting channel type: %s", nc.ChannelType())
 			if err := nc.Reject(ssh.UnknownChannelType, "channel not currently supported"); err != nil {
 				logrus.Errorf("Reject error: %v", err)
 			}
-			continue
 		}
-
-		c, rc, err := nc.Accept()
-		if err != nil {
-			logrus.Errorf("Accept error: %v", err)
-			break
-		}
-
-		go d.handleChannelRequests(sc, c, rc)
 	}
 }
 
@@ -206,6 +255,71 @@ func (d *Dispatcher) handleChannelRequests(sc *ssh.ServerConn, c ssh.Channel, rc
 	}
 }
 
+func (d *Dispatcher) handleForward(sc *ssh.ServerConn, nc ssh.NewChannel, address string) {
+	var h ForwardDial
+	if ah, ok := d.forwards[address]; ok {
+		h = ah
+	} else if dh, ok := d.forwards[""]; ok {
+		h = dh
+	}
+
+	if h == nil {
+		if err := nc.Reject(ssh.Prohibited, "connection to host not allowed"); err != nil {
+			logrus.Errorf("Reject error: %v", err)
+		}
+		return
+	}
+
+	cs := ConnectionSettings{
+		User:        sc.User(),
+		Permissions: sc.Permissions,
+	}
+
+	conn, err := h(address, cs)
+	if err != nil {
+		if err := nc.Reject(ssh.ConnectionFailed, "connection to host failed"); err != nil {
+			logrus.Errorf("Forward connection error: %v", err)
+		}
+		return
+	}
+	defer conn.Close()
+
+	c, rc, err := nc.Accept()
+	if err != nil {
+		logrus.Errorf("Accept error: %v", err)
+		return
+	}
+	defer c.Close()
+
+	go discardRequests(rc)
+
+	downErr := make(chan error, 1)
+	upErr := make(chan error, 1)
+
+	go func() {
+		_, err := io.Copy(c, conn)
+		downErr <- err
+
+	}()
+
+	go func() {
+		_, err := io.Copy(conn, c)
+		upErr <- err
+	}()
+
+	select {
+	case err := <-downErr:
+		c.CloseWrite()
+		if err != nil {
+			logrus.Debugf("Copy error sending down: %v", err)
+		}
+	case err := <-upErr:
+		if err != nil {
+			logrus.Debugf("Copy error sending up: %v", err)
+		}
+	}
+}
+
 func wrapHandler(h Handler) Handler {
 	return func(c ssh.Channel, cs ConnectionSettings, ts <-chan TerminalSettings) error {
 		defer c.Close()
@@ -230,16 +344,6 @@ func wrapHandler(h Handler) Handler {
 
 		return nil
 	}
-}
-
-// HandleShells calls the given handler with a shell request is received.
-func (d *Dispatcher) HandleShell(h Handler) {
-	d.shell = wrapHandler(h)
-}
-
-// HandleCommand handles exec commands for the provided name.
-func (d *Dispatcher) HandleCommand(name string, h Handler) {
-	d.commands[name] = wrapHandler(h)
 }
 
 func (d *Dispatcher) lookupCommand(name string) (Handler, error) {
