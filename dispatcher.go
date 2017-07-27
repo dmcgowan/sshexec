@@ -17,6 +17,7 @@ type ConnectionSettings struct {
 	User        string
 	Permissions *ssh.Permissions
 	Env         map[string]string
+	Client      string
 }
 
 type TerminalSettings struct {
@@ -103,7 +104,6 @@ func (d *Dispatcher) handleConn(conn net.Conn) {
 		return
 	}
 	defer sc.Close()
-	// Defer wait for shutdown
 
 	go discardRequests(rc)
 
@@ -151,6 +151,7 @@ func (d *Dispatcher) handleChannelRequests(sc *ssh.ServerConn, c ssh.Channel, rc
 		User:        sc.User(),
 		Permissions: sc.Permissions,
 		Env:         map[string]string{},
+		Client:      string(sc.ClientVersion()),
 	}
 	var tchan chan TerminalSettings
 	var handled bool
@@ -334,6 +335,7 @@ func wrapHandler(h Handler) Handler {
 			// TODO: Check if has status function
 			responseStatus = 1
 		}
+		c.CloseWrite()
 
 		payload := make([]byte, 4)
 		binary.BigEndian.PutUint32(payload, responseStatus)
