@@ -6,9 +6,9 @@ import (
 	"io"
 	"net"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/google/shlex"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
 

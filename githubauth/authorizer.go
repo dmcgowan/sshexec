@@ -3,9 +3,9 @@ package githubauth
 import (
 	"strings"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/google/go-github/github"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/oauth2"
 )

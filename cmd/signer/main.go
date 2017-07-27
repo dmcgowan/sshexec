@@ -15,10 +15,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/dmcgowan/sshexec"
 	"github.com/dmcgowan/sshexec/githubauth"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
 
