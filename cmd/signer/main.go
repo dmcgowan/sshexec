@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -48,7 +49,15 @@ func main() {
 
 	flag.Parse()
 
-	ga, err := githubauth.NewGithubAuthorizer(githubToken, githubOrg, githubTeam, githubAdminTeam)
+	var teams []string
+	if githubTeam != "" {
+		teams = append(teams, githubTeam)
+	}
+	if githubAdminTeam != "" {
+		teams = append(teams, githubAdminTeam)
+	}
+
+	ga, err := githubauth.NewGithubAuthorizer(context.Background(), githubToken, githubOrg, teams...)
 	if err != nil {
 		logrus.Fatalf("Failure creating authorizer: %+v", err)
 	}
