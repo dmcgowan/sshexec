@@ -9,17 +9,18 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"flag"
-	"io/ioutil"
+	"io"
 	"math/big"
 	"net"
 	"os"
 	"time"
 
-	"github.com/dmcgowan/sshexec"
-	"github.com/dmcgowan/sshexec/githubauth"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
+
+	"github.com/dmcgowan/sshexec"
+	"github.com/dmcgowan/sshexec/githubauth"
 )
 
 func main() {
@@ -65,7 +66,7 @@ func main() {
 	d := sshexec.NewDispatcher(signer, ga)
 
 	d.HandleCommand("sign", func(c ssh.Channel, cs sshexec.ConnectionSettings, ts <-chan sshexec.TerminalSettings) error {
-		pemBlock, err := ioutil.ReadAll(c)
+		pemBlock, err := io.ReadAll(c)
 		if err != nil {
 			return errors.Wrap(err, "failed to read all")
 		}
@@ -150,7 +151,7 @@ func loadCertificate(certFile, keyFile string) (*x509.Certificate, crypto.Privat
 }
 
 func getServerKey(keyFile string) (ssh.Signer, error) {
-	b, err := ioutil.ReadFile(keyFile)
+	b, err := os.ReadFile(keyFile)
 	if err == nil {
 		return ssh.ParsePrivateKey(b)
 	} else if !os.IsNotExist(err) {

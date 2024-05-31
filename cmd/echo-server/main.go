@@ -7,7 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"flag"
-	"io/ioutil"
+	"io"
 	"net"
 	"os"
 
@@ -60,7 +60,7 @@ func main() {
 	d := sshexec.NewDispatcher(signer, ga)
 
 	d.HandleCommand("echo", func(c ssh.Channel, cs sshexec.ConnectionSettings, ts <-chan sshexec.TerminalSettings) error {
-		b, err := ioutil.ReadAll(c)
+		b, err := io.ReadAll(c)
 		if err != nil {
 			return errors.Wrap(err, "failed to read all")
 		}
@@ -83,7 +83,7 @@ func main() {
 }
 
 func getServerKey(keyFile string) (ssh.Signer, error) {
-	b, err := ioutil.ReadFile(keyFile)
+	b, err := os.ReadFile(keyFile)
 	if err == nil {
 		return ssh.ParsePrivateKey(b)
 	} else if !os.IsNotExist(err) {
