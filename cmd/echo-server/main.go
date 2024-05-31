@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -10,11 +11,12 @@ import (
 	"net"
 	"os"
 
-	"github.com/dmcgowan/sshexec"
-	"github.com/dmcgowan/sshexec/githubauth"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
+
+	"github.com/dmcgowan/sshexec"
+	"github.com/dmcgowan/sshexec/githubauth"
 )
 
 func main() {
@@ -36,7 +38,16 @@ func main() {
 
 	flag.Parse()
 
-	ga, err := githubauth.NewGithubAuthorizer(githubToken, githubOrg, githubTeam, githubAdminTeam)
+	ctx := context.Background()
+
+	var teams []string
+	if githubTeam != "" {
+		teams = append(teams, githubTeam)
+	}
+	if githubAdminTeam != "" {
+		teams = append(teams, githubAdminTeam)
+	}
+	ga, err := githubauth.NewGithubAuthorizer(ctx, githubToken, githubOrg, teams...)
 	if err != nil {
 		logrus.Fatalf("Failure creating authorizer: %+v", err)
 	}

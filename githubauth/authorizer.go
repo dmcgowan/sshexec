@@ -1,6 +1,7 @@
 package githubauth
 
 import (
+	"context"
 	"strings"
 
 	"github.com/google/go-github/github"
@@ -11,26 +12,28 @@ import (
 )
 
 type GithubAuthorizer struct {
+	ctx          context.Context
 	client       *github.Client
 	organization string
-	teams        map[string]int
+	teams        map[string]int64
 }
 
-func NewGithubAuthorizer(token, organization string, teams ...string) (*GithubAuthorizer, error) {
+func NewGithubAuthorizer(ctx context.Context, token, organization string, teams ...string) (*GithubAuthorizer, error) {
 	ts := oauth2.StaticTokenSource(
 		&oauth2.Token{AccessToken: token},
 	)
 
-	githubClient := github.NewClient(oauth2.NewClient(oauth2.NoContext, ts))
+	githubClient := github.NewClient(oauth2.NewClient(ctx, ts))
 
-	teamIDs := map[string]int{}
+	teamIDs := map[string]int64{}
 	if organization != "" {
 		listOptions := &github.ListOptions{
 			Page:    1,
 			PerPage: 100,
 		}
 		for {
-			ghteams, _, err := githubClient.Organizations.ListTeams(organization, listOptions)
+			ghteams, _, err := githubClient.Teams.ListTeams(ctx, organization, listOptions)
+
 			if err != nil {
 				return nil, errors.Wrap(err, "list teams github api error")
 			}
@@ -59,6 +62,7 @@ func NewGithubAuthorizer(token, organization string, teams ...string) (*GithubAu
 	}
 
 	return &GithubAuthorizer{
+		ctx:          ctx,
 		client:       githubClient,
 		organization: organization,
 		teams:        teamIDs,
@@ -69,7 +73,7 @@ func (ga GithubAuthorizer) Authorize(conn ssh.ConnMetadata, key ssh.PublicKey) (
 	authorizedKey := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key)))
 	var foundKey bool
 
-	keys, _, err := ga.client.Users.ListKeys(conn.User(), &github.ListOptions{})
+	keys, _, err := ga.client.Users.ListKeys(ga.ctx, conn.User(), &github.ListOptions{})
 	if err != nil {
 		logrus.Infof("Error getting key: %v", err)
 		return nil, errors.Wrap(err, "list keys github api error")
@@ -88,25 +92,27 @@ func (ga GithubAuthorizer) Authorize(conn ssh.ConnMetadata, key ssh.PublicKey) (
 	}
 
 	permissions := &ssh.Permissions{
-		Extensions: map[string]string{
-			"organization": ga.organization,
-		},
+		Extensions: map[string]string{},
 	}
 
-	var hasPermission bool
-	for team, teamID := range ga.teams {
-		isMember, _, err := ga.client.Organizations.IsTeamMember(teamID, conn.User())
-		if err != nil {
-			return nil, errors.Wrapf(err, "is team member (%d) github api error", team)
-		}
-		if isMember {
-			permissions.Extensions["team-"+team] = "true"
-			hasPermission = true
-		}
-	}
+	if ga.organization != "" {
+		permissions.Extensions["organization"] = ga.organization
 
-	if !hasPermission {
-		return nil, errors.New("no valid team membership")
+		var hasPermission bool
+		for team, teamID := range ga.teams {
+			_, resp, err := ga.client.Teams.GetTeamMembership(ga.ctx, teamID, conn.User())
+			if err != nil {
+				return nil, errors.Wrapf(err, "is team member (%d) github api error", team)
+			}
+			if resp.StatusCode == 200 {
+				permissions.Extensions["team-"+team] = "true"
+				hasPermission = true
+			}
+		}
+
+		if !hasPermission {
+			return nil, errors.New("no valid team membership")
+		}
 	}
 
 	logrus.Infof("Logging from %s using %s", conn.User(), authorizedKey)
